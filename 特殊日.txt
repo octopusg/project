@@ -1,0 +1,184 @@
+#coding=utf-8
+
+#支持python 2.x
+
+import MySQLdb
+import datetime
+import time
+import numpy as np
+from decimal import *
+
+#日权重指数，要预先计算好
+DayWeight = [1.0, 1.0738560312166792,1.0458707044762516, 1.120606085713694, 1.611264623365624,2.008492139113864, 2.0259342055435434]
+FridayWeight = 1.611264623365624
+
+#获取所有调休日的日期
+allPaidLeaveDate =  []
+def getPaidLeaveDate():
+    db = MySQLdb.connect(host="rm-wz99x7g4vtrgb527ao.mysql.rds.aliyuncs.com", user="frcs", passwd="CyyM6cqHIIT6xVOXYIWW", db="frcs", charset="utf8")
+    cursor = db.cursor()
+    # 从数据库中读取节假日参数
+    sql = "select   str_to_date(CONCAT(substr(date, 1, 10),' 00:00:00'),'%Y-%m-%d %H:%i:%s')  from t_holiday_setting where adjust_day  = 5 "
+    cursor.execute(sql)
+    paidLeaveDate = cursor.fetchall()
+    for row in paidLeaveDate:
+
+        allPaidLeaveDate.append(row[0])
+    return allPaidLeaveDate
+
+
+
+
+
+
+#特殊日权重指数，本程序最终计算结果
+holidayWeight = np.zeros(380)
+holidayCnt = np.zeros(380)
+
+#是否节假日
+def isHoliday(h, t):
+    for index in range(len(h)):
+        if h[index]["date"]==t:
+            if not(h[index]["holiday_code1"]=="" and h[index]["holiday_code2"]==""):
+                return True
+            else:
+                return False
+    return False
+
+#获取假日块，以及假日块对应的标准周时间
+def getHolidayBlock(h, t):
+    maxDate = h[len(h)-1]["date"]
+    blockFrom = t
+    while t<=maxDate:
+        if isHoliday(h, t):
+            t = t+datetime.timedelta(1)
+        else:
+            blockTo = t+datetime.timedelta(-1)
+            tmp = t+datetime.timedelta(1)
+            while (not isHoliday(h, tmp)) and tmp<=maxDate:
+                tmp = tmp+datetime.timedelta(1)
+
+            if (tmp-t).days>=7:
+                standardWeekFrom = t
+                standardWeekTo = datetime.timedelta(min((tmp-t).days-1, 20)) + t
+                return blockFrom, blockTo, standardWeekFrom, standardWeekTo
+            else:
+                t = tmp
+
+    #最后一个节日块，只有节日部分，没有标准周
+    if t>maxDate:
+        pass
+
+    return None, None, None, None
+
+# 从数据库中读取节假日参数
+db=MySQLdb.connect(host="rm-wz99x7g4vtrgb527ao.mysql.rds.aliyuncs.com",user="frcs",passwd="CyyM6cqHIIT6xVOXYIWW",db="frcs",charset="utf8")
+cursor = db.cursor()
+
+h = []
+sql = "select date, holiday_code1, holiday_code2, adjust_day from t_holiday_setting"
+cursor.execute(sql)
+results = cursor.fetchall()
+for row in results:
+    h.append({"date":row[0], "holiday_code1":row[1], "holiday_code2":row[2], "adjust_day":row[3]})
+# 测试代码
+#for index in range(len(h)):
+#       print index, h[index]["holiday_code1"]
+
+
+
+#计算标准周的单位权重值
+def calcStandardWeekWeight(s, standardWeekFrom, standardWeekTo):
+    saleSum = 0
+    weightSum = 0
+    for index in range(len(s)):
+        if s[index]["date"]>=standardWeekFrom and s[index]["date"]<=standardWeekTo:
+            saleSum = saleSum + s[index]["sale"]
+
+
+
+           #         print("\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\")
+          #          weightSum = weightSum + FridayWeight
+
+            weightSum = weightSum + DayWeight[s[index]["date"].weekday()]
+    return saleSum / Decimal(weightSum)
+
+#获取对应日期的销量
+def getSale(s, t):
+    for index in range(len(s)):
+        if s[index]["date"]==t:
+            return s[index]["sale"];
+    return 0
+
+#获取节假日设置
+def getHolidaySetting(h, date):
+    for index in range(len(h)):
+        if h[index]["date"]==date:
+            return h[index]
+
+    return None
+
+MEMBER_NO = "003075502"
+FILTER = "黄金"
+
+
+
+
+
+# 从数据库中读取销量数据     t_detail_003075502
+s = []
+sql = "select str_to_date(CONCAT(substr(out_time, 1, 10),' 00:00:00'),'%Y-%m-%d %H:%i:%s'), COUNT(1) from xiaoqing.t_detail_003075502 where member_no = '003075502' and inv_type = '02' and  sale_price > 0 group by substr(out_time, 1, 10) "
+cursor.execute(sql)
+results = cursor.fetchall()
+for row in results:
+    s.append({"date":row[0], "sale":row[1]})
+# 测试代码
+#for index in range(len(s)):
+#       print index, s[index]["date"]
+
+
+
+#算法开始
+maxDate = h[len(h)-1]["date"]
+t = datetime.datetime(2015, 1, 1)
+while t<=datetime.datetime(2017, 12, 31):
+    while (not isHoliday(h, t)) and t<=maxDate:
+        t = t + datetime.timedelta(1)
+
+    #探测节日块结束
+    if t>maxDate:
+        break
+
+    blockFrom, blockTo, standardWeekFrom, standardWeekTo = getHolidayBlock(h, t)
+    print(blockFrom, blockTo, standardWeekFrom, standardWeekTo)
+    #探测节日块失败
+    if blockFrom is None:
+        break
+
+    #获得标准周单位权重值
+    weight = calcStandardWeekWeight(s, standardWeekFrom, standardWeekTo)
+
+    for i in range(0, (blockTo-blockFrom).days+1):
+        tt = blockFrom + datetime.timedelta(i)
+        if isHoliday(h, tt):
+            sale = getSale(s, tt)
+            holidaySetting = getHolidaySetting(h, tt)
+            if not holidaySetting["holiday_code1"]=="":
+                holiday_code1 = int(holidaySetting["holiday_code1"])
+                holidayWeight[holiday_code1] = Decimal(holidayWeight[holiday_code1]) + Decimal(sale) / Decimal(weight)
+
+                holidayCnt[holiday_code1] = holidayCnt[holiday_code1] + 1
+            if not holidaySetting["holiday_code2"]=="":
+                holiday_code2 = int(holidaySetting["holiday_code2"])
+                holidayWeight[holiday_code2] = Decimal(holidayWeight[holiday_code2]) + Decimal(sale) / Decimal(weight)
+
+                holidayCnt[holiday_code2] = holidayCnt[holiday_code2] + 1
+
+    t = standardWeekTo+datetime.timedelta(1)
+
+for i in range(0, len(holidayWeight)):
+    if holidayCnt[i]>0:
+        if(holidayCnt[i]>3):
+            print(str(i)+"   特殊权重值:="+str(holidayWeight[i])+"    ="+str(holidayWeight[i] / 3)+",节假日次数：     "+str(3))
+        else:
+            print(str(i)+ "  特殊权重值:=" + str(holidayWeight[i]) + "    =" + str(holidayWeight[i] / holidayCnt[i]) + ",节假日次数：     " + str(holidayCnt[i]))
